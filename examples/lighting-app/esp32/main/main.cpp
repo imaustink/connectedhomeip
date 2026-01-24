@@ -22,6 +22,8 @@
 #include <common/CHIPDeviceManager.h>
 #include <common/Esp32AppServer.h>
 #include <common/Esp32ThreadInit.h>
+#include <app/util/endpoint-config-api.h>
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "spi_flash_mmap.h"
 #else
@@ -132,6 +134,9 @@ static void InitServer(intptr_t context)
 
     DeviceCallbacksDelegate::Instance().SetAppDelegate(&sAppDeviceCallbacksDelegate);
     Esp32AppServer::Init(); // Init ZCL Data Model and CHIP App Server AND Initialize device attestation config
+
+    // Disable endpoint 2 (secondary network interface) - not implemented
+    emberAfEndpointEnableDisable(2, false);
 
 #if CONFIG_ENABLE_ESP_INSIGHTS_TRACE
     esp_insights_config_t config = {

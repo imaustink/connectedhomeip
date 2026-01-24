@@ -35,6 +35,12 @@
 #define APP_ERROR_START_TIMER_FAILED CHIP_APPLICATION_ERROR(0x05)
 #define APP_ERROR_STOP_TIMER_FAILED CHIP_APPLICATION_ERROR(0x06)
 
+// Commissioning button on D6 (GPIO16)
+#define COMMISSIONING_BUTTON_GPIO GPIO_NUM_16
+
+// Commissioning LED on GPIO15 (User LED)
+#define COMMISSIONING_LED_GPIO GPIO_NUM_15
+
 extern LEDWidget AppLED;
 extern Button AppButton;
 
@@ -52,16 +58,28 @@ public:
 
 private:
     friend AppTask & GetAppTask(void);
+    friend void commissioning_button_isr_handler(void * arg);
+    
     CHIP_ERROR Init();
     void DispatchEvent(AppEvent * event);
     static void SwitchActionEventHandler(AppEvent * aEvent);
     static void LightingActionEventHandler(AppEvent * aEvent);
+    static void CommissioningButtonEventHandler(AppEvent * aEvent);
 
 #if CONFIG_DEVICE_TYPE_M5STACK
     static void ButtonPressedAction(AppEvent * aEvent);
 #endif
 
+    CHIP_ERROR InitCommissioningButton();
+    CHIP_ERROR InitCommissioningLED();
+    
+    static void StartCommissioningLEDFlash();
+    static void StopCommissioningLEDFlash();
+    static void CommissioningLEDTimerCallback(TimerHandle_t xTimer);
+
     static AppTask sAppTask;
+    static TimerHandle_t sCommissioningLEDTimer;
+    static bool sCommissioningLEDState;
 };
 
 inline AppTask & GetAppTask(void)

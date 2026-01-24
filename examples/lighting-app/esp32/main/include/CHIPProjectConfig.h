@@ -38,6 +38,20 @@
 #define CHIP_CONFIG_MAX_FABRICS 5 // 5 is the minimum number of supported fabrics
 
 /**
+ * CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME
+ *
+ * Vendor name displayed in Matter controllers
+ */
+#define CHIP_DEVICE_CONFIG_DEVICE_VENDOR_NAME "GE Appliances"
+
+/**
+ * CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME
+ *
+ * Product name displayed in Matter controllers
+ */
+#define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_NAME "GE Range Hood"
+
+/**
  * @def CHIP_IM_MAX_NUM_SUBSCRIPTIONS
  *
  * @brief Defines the maximum number of ReadHandler for subscriptions, limits the number of active subscription transactions on

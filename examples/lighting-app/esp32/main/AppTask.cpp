@@ -28,6 +28,7 @@
 #include <app/reporting/reporting.h>
 #include <app/server/Server.h>
 #include <app/server/CommissioningWindowManager.h>
+#include <app/InteractionModelEngine.h>
 #include "driver/gpio.h"
 
 #define APP_TASK_NAME "APP"
@@ -55,6 +56,8 @@ TaskHandle_t sAppTaskHandle;
 AppTask AppTask::sAppTask;
 TimerHandle_t AppTask::sCommissioningLEDTimer = nullptr;
 bool AppTask::sCommissioningLEDState = false;
+bool AppTask::sUpdatingFromHardware = false;
+bool AppTask::sInitialSyncDone = false;
 
 CHIP_ERROR AppTask::StartAppTask()
 {
@@ -126,6 +129,14 @@ CHIP_ERROR AppTask::Init()
         ESP_LOGE(TAG, "DeviceManager.Init() failed");
         return err;
     }
+    
+    // Register callback for hardware state changes (button presses and Matter command completions)
+    DeviceMgr().SetStateChangeCallback([]() {
+        ESP_LOGI(TAG, "Hardware state changed, scheduling Matter update");
+        chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
+            sAppTask.UpdateClusterState();
+        });
+    });
 
     // Initialize commissioning button
     err = InitCommissioningButton();
@@ -171,6 +182,23 @@ void AppTask::AppTaskMain(void * pvParameter)
         {
             sAppTask.DispatchEvent(&event);
             eventReceived = xQueueReceive(sAppEventQueue, &event, 0); // return immediately if the queue is empty
+        }
+        
+        // Check if we need to do initial cluster sync (delayed until subscriptions are active)
+        if (!sInitialSyncDone)
+        {
+            // Check if there are any active subscriptions
+            uint32_t numSubscriptions = chip::app::InteractionModelEngine::GetInstance()->GetNumActiveReadHandlers(
+                chip::app::ReadHandler::InteractionType::Subscribe);
+            
+            if (numSubscriptions > 0)
+            {
+                ESP_LOGI(TAG, "Subscriptions active (%lu), performing initial cluster sync", numSubscriptions);
+                sInitialSyncDone = true;
+                chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
+                    sAppTask.UpdateClusterState();
+                });
+            }
         }
         
         // Check for hardware state changes from interrupts (non-blocking)
@@ -252,6 +280,9 @@ void AppTask::UpdateClusterState()
 {
     Protocols::InteractionModel::Status status;
     
+    // Set flag to prevent attribute callbacks from triggering hardware changes
+    sUpdatingFromHardware = true;
+    
     // Update Light endpoint
     ESP_LOGI(TAG, "Updating Light endpoint (EP %d)", kLightEndpointId);
     bool lightOn = DeviceMgr().IsLightOn();
@@ -315,11 +346,56 @@ void AppTask::UpdateClusterState()
         MatterReportingAttributeChangeCallback(kFanEndpointId, Clusters::FanControl::Id,
                                                Clusters::FanControl::Attributes::PercentCurrent::Id);
     }
+    
+    // Update FanMode to match the speed (important for controllers that rely on FanMode)
+    chip::app::Clusters::FanControl::FanModeEnum fanMode;
+    if (fanSpeed == 0)
+    {
+        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kOff;
+    }
+    else if (fanSpeed <= 33)
+    {
+        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kLow;
+    }
+    else if (fanSpeed <= 66)
+    {
+        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kMedium;
+    }
+    else
+    {
+        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kHigh;
+    }
+    
+    status = Clusters::FanControl::Attributes::FanMode::Set(kFanEndpointId, fanMode);
+    if (status != Protocols::InteractionModel::Status::Success)
+    {
+        ESP_LOGE(TAG, "Updating fan FanMode failed: %x", to_underlying(status));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "FanMode cluster updated to: %d", to_underlying(fanMode));
+        // Notify subscribers of the change
+        MatterReportingAttributeChangeCallback(kFanEndpointId, Clusters::FanControl::Id,
+                                               Clusters::FanControl::Attributes::FanMode::Id);
+    }
+    
+    // Clear flag - callbacks can now trigger hardware changes
+    sUpdatingFromHardware = false;
 }
 
 // Commissioning Button ISR (non-static, declared as friend in AppTask.h)
 void IRAM_ATTR commissioning_button_isr_handler(void * arg)
 {
+    static TickType_t lastInterruptTime = 0;
+    TickType_t currentTime = xTaskGetTickCountFromISR();
+    
+    // Debounce: ignore interrupts within 500ms of last press
+    if ((currentTime - lastInterruptTime) < pdMS_TO_TICKS(500))
+    {
+        return;
+    }
+    lastInterruptTime = currentTime;
+    
     AppEvent event;
     event.Type = AppEvent::kEventType_Button;
     event.mHandler = AppTask::CommissioningButtonEventHandler;

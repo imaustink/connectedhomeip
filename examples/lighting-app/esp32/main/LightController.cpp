@@ -451,6 +451,13 @@ void LightController::CycleToTargetLevel()
     }
     
     xSemaphoreGive(mSyncMutex);
+    
+    // Notify Matter that hardware state changed (for Matter-initiated changes)
+    if (mStateChangeCallback)
+    {
+        ESP_LOGI(TAG, "Notifying Matter of completed level change");
+        mStateChangeCallback();
+    }
 }
 
 void LightController::SetLevel(LightLevel level)

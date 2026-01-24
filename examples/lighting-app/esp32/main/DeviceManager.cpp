@@ -30,6 +30,14 @@ CHIP_ERROR DeviceManager::Init()
     mFanController.Init();
     mLightController.Init();
     
+    // Set callback for light state changes (button presses and Matter commands)
+    mLightController.SetStateChangeCallback([this]() {
+        if (mStateChangeCallback)
+        {
+            mStateChangeCallback();
+        }
+    });
+    
     ESP_LOGI(TAG, "DeviceManager initialized successfully");
     return CHIP_NO_ERROR;
 }

@@ -243,6 +243,22 @@ endpoint 3 {
 ### Additional Includes Needed
 The following includes were added to support the implementation:
 - `#include <app/clusters/fan-control-server/fan-control-server.h>`
+- `#include <app/InteractionModelEngine.h>` (for checking active subscriptions)
+
+### State Synchronization Optimization
+
+**Delayed Initial Sync**: The initial cluster state synchronization is delayed until Matter subscriptions are active. This optimization prevents attribute reports from queueing during the 5-10 second boot period when:
+- Subscriptions are being resumed (~3 seconds)
+- CASE sessions are being established (~5-6 seconds)
+
+**Implementation**: The AppTask main loop checks for active subscriptions using `InteractionModelEngine::GetNumActiveReadHandlers()`. Once subscriptions are detected (typically ~9-10 seconds after boot), the initial `UpdateClusterState()` is called. This ensures attribute reports are sent immediately rather than queuing for delivery.
+
+**Benefits**:
+- Controllers see device state immediately after subscriptions are ready
+- No wasted attribute reports sent before sessions are established
+- More responsive user experience during device initialization
+
+**Runtime Behavior**: Hardware state changes during runtime continue to trigger immediate Matter updates via the callback chain, ensuring instant responsiveness after initial boot.
 
 ## Testing
 

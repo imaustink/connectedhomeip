@@ -55,6 +55,9 @@ public:
     void ButtonEventHandler(const uint8_t buttonHandle, uint8_t btnAction);
 
     void UpdateClusterState();
+    
+    // Flag to prevent feedback loop when updating Matter from hardware
+    static bool IsUpdatingFromHardware() { return sUpdatingFromHardware; }
 
 private:
     friend AppTask & GetAppTask(void);
@@ -80,6 +83,8 @@ private:
     static AppTask sAppTask;
     static TimerHandle_t sCommissioningLEDTimer;
     static bool sCommissioningLEDState;
+    static bool sUpdatingFromHardware;  // Flag to prevent feedback loop
+    static bool sInitialSyncDone;       // Flag to track if initial cluster sync is complete
 };
 
 inline AppTask & GetAppTask(void)

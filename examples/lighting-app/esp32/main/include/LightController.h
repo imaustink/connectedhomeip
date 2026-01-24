@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include <functional>
 
 enum class LightLevel : uint8_t
 {
@@ -34,6 +35,8 @@ enum class LightLevel : uint8_t
 class LightController
 {
 public:
+    using StateChangeCallback = std::function<void()>;
+    
     bool Init();
     void SetLevel(LightLevel level);
     void SetLevelDebounced(LightLevel level); // Debounced version for Matter
@@ -43,6 +46,9 @@ public:
     
     // Called by ISR to notify state change
     void NotifyStateChange();
+    
+    // Set callback for state changes
+    void SetStateChangeCallback(StateChangeCallback callback) { mStateChangeCallback = callback; }
 
 private:
     LightLevel mCurrentLevel;
@@ -56,6 +62,7 @@ private:
     bool mUpdatingFromHardware;  // Flag to prevent Matter callback loops in TEST MODE
     bool mStartupComplete;  // Flag to prevent hardware cycling during startup init
     bool mHasPendingCycleCommand;  // Flag for pending commands received during cycles
+    StateChangeCallback mStateChangeCallback;
     
     // Debouncing for hardware ISR
     volatile uint32_t mLastInterruptTime;

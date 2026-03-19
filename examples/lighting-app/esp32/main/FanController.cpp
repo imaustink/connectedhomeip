@@ -23,185 +23,147 @@
 
 static const char TAG[] = "FanController";
 
-// ISR: fires on fan button press (rising or falling edge depending on circuit).
-// Mirrors the LightController ISR approach with debounce.
-void IRAM_ATTR FanController::FanButtonISR(void * arg)
-{
-    FanController * self = static_cast<FanController *>(arg);
-
-    // Hardware debounce: ignore edges within kDebounceMs of the previous one
-    uint32_t now = xTaskGetTickCountFromISR() * portTICK_PERIOD_MS;
-    if ((now - self->mLastInterruptTime) < kDebounceMs)
-    {
-        return;
-    }
-    self->mLastInterruptTime = now;
-
-    // Notify the AppTask (stored during Init)
-    if (self->mTaskHandle != nullptr)
-    {
-        BaseType_t higherPriorityTaskWoken = pdFALSE;
-        vTaskNotifyGiveFromISR(self->mTaskHandle, &higherPriorityTaskWoken);
-        portYIELD_FROM_ISR(higherPriorityTaskWoken);
-    }
-}
-
 void FanController::Init()
 {
-    // Store the calling task handle (AppTask) so the ISR can notify it
-    mTaskHandle = xTaskGetCurrentTaskHandle();
-    mLastInterruptTime = 0;
-    mLastProcessedTime = 0;
-
-    // Configure control pin as output, default LOW
-    gpio_config_t out_conf  = {};
-    out_conf.intr_type      = GPIO_INTR_DISABLE;
-    out_conf.mode           = GPIO_MODE_OUTPUT;
-    out_conf.pin_bit_mask   = (1ULL << kFanControlPin);
-    out_conf.pull_down_en   = GPIO_PULLDOWN_DISABLE;
-    out_conf.pull_up_en     = GPIO_PULLUP_DISABLE;
+    // Configure control pins as outputs
+    gpio_config_t out_conf = {};
+    out_conf.intr_type     = GPIO_INTR_DISABLE;
+    out_conf.mode          = GPIO_MODE_OUTPUT;
+    out_conf.pin_bit_mask  = (1ULL << kFanOffControlPin) | (1ULL << kFanLowControlPin) |
+                             (1ULL << kFanMediumControlPin) | (1ULL << kFanHighControlPin);
+    out_conf.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    out_conf.pull_up_en    = GPIO_PULLUP_DISABLE;
     gpio_config(&out_conf);
-    gpio_set_level(kFanControlPin, 0);
 
-    // Configure LED status pin as input with pull-up (active-LOW: LOW = fan ON)
-    gpio_config_t status_conf  = {};
-    status_conf.intr_type      = GPIO_INTR_DISABLE;
-    status_conf.mode           = GPIO_MODE_INPUT;
-    status_conf.pin_bit_mask   = (1ULL << kFanLEDStatusPin);
-    status_conf.pull_down_en   = GPIO_PULLDOWN_DISABLE;
-    status_conf.pull_up_en     = GPIO_PULLUP_ENABLE;
-    esp_err_t err = gpio_config(&status_conf);
+    // Initialize all control pins to low
+    gpio_set_level(kFanOffControlPin, 0);
+    gpio_set_level(kFanLowControlPin, 0);
+    gpio_set_level(kFanMediumControlPin, 0);
+    gpio_set_level(kFanHighControlPin, 0);
+    
+    // Configure status pins as inputs (active-LOW with pull-up - pulled to ground when that speed is active)
+    gpio_config_t in_conf = {};
+    in_conf.intr_type     = GPIO_INTR_DISABLE;
+    in_conf.mode          = GPIO_MODE_INPUT;
+    in_conf.pin_bit_mask  = (1ULL << kFanLowStatusPin) | (1ULL << kFanMediumStatusPin) |
+                            (1ULL << kFanHighStatusPin);
+    in_conf.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    in_conf.pull_up_en    = GPIO_PULLUP_ENABLE;
+    esp_err_t err = gpio_config(&in_conf);
     if (err != ESP_OK)
     {
-        ESP_LOGE(TAG, "Failed to configure LED status pin: %d", err);
+        ESP_LOGE(TAG, "Failed to configure status pins: %d", err);
     }
+    
+    ESP_LOGI(TAG, "Status pins configured: D7(GPIO%d), D8(GPIO%d), D9(GPIO%d)", 
+             kFanLowStatusPin, kFanMediumStatusPin, kFanHighStatusPin);
+    
+    // Read current state from hardware
+    mCurrentSpeed = ReadCurrentSpeed();
 
-    // Configure interrupt pin as input with pull-up, trigger on any edge
-    gpio_config_t int_conf  = {};
-    int_conf.intr_type      = GPIO_INTR_ANYEDGE;
-    int_conf.mode           = GPIO_MODE_INPUT;
-    int_conf.pin_bit_mask   = (1ULL << kFanInterruptPin);
-    int_conf.pull_down_en   = GPIO_PULLDOWN_DISABLE;
-    int_conf.pull_up_en     = GPIO_PULLUP_ENABLE;
-    err = gpio_config(&int_conf);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to configure interrupt pin: %d", err);
-    }
-
-    // ISR service should already be installed by AppTask (commissioning button)
-    err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
-    {
-        ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", err);
-    }
-
-    err = gpio_isr_handler_add(kFanInterruptPin, FanButtonISR, this);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "gpio_isr_handler_add failed: %d", err);
-    }
-
-    // Read initial state from LED
-    mCurrentSpeed = ReadLEDStatus() ? FanSpeed::High : FanSpeed::Off;
-    ESP_LOGI(TAG, "FanController initialized. LED status pin GPIO%d, fan is %s",
-             kFanLEDStatusPin, mCurrentSpeed == FanSpeed::High ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Fan controller initialized with current speed: %d", static_cast<uint8_t>(mCurrentSpeed));
 }
 
 void FanController::SetSpeed(FanSpeed speed)
 {
-    // Only Off and High are supported
-    if (speed != FanSpeed::Off && speed != FanSpeed::High)
+    if (speed == mCurrentSpeed)
     {
-        ESP_LOGW(TAG, "Unsupported fan speed %d, clamping to High", static_cast<uint8_t>(speed));
-        speed = FanSpeed::High;
-    }
-
-    bool targetOn   = (speed == FanSpeed::High);
-    bool currentOn  = ReadLEDStatus();
-
-    if (targetOn == currentOn)
-    {
-        ESP_LOGI(TAG, "Fan already in requested state (%s), skipping pulse",
-                 targetOn ? "ON" : "OFF");
-        mCurrentSpeed = speed;
         return;
     }
 
-    ESP_LOGI(TAG, "Sending control pulse to set fan %s", targetOn ? "ON" : "OFF");
-    SendControlPulse();
-
-    // Allow hardware to settle then verify via LED
-    vTaskDelay(pdMS_TO_TICKS(200));
-    bool actualOn = ReadLEDStatus();
-    if (actualOn != targetOn)
+    mCurrentSpeed = speed;
+    
+    // Send pulse to appropriate control pin
+    gpio_num_t controlPin;
+    switch (speed)
     {
-        ESP_LOGW(TAG, "Fan state mismatch after pulse: expected %s, LED reads %s",
-                 targetOn ? "ON" : "OFF", actualOn ? "ON" : "OFF");
-    }
-
-    mCurrentSpeed = actualOn ? FanSpeed::High : FanSpeed::Off;
-    ESP_LOGI(TAG, "Fan speed set to: %s", mCurrentSpeed == FanSpeed::High ? "High/ON" : "Off");
-}
-
-void FanController::SendControlPulse()
-{
-    gpio_set_level(kFanControlPin, 1);
-    vTaskDelay(pdMS_TO_TICKS(kPulseDurationMs));
-    gpio_set_level(kFanControlPin, 0);
-}
-
-bool FanController::ReadLEDStatus()
-{
-    // Active-LOW: GPIO LOW means fan is ON
-    return gpio_get_level(kFanLEDStatusPin) == 0;
-}
-
-// Called from the main AppTask loop (non-blocking, mirrors LightController::NotifyStateChange)
-void FanController::NotifyStateChange()
-{
-    // Non-blocking check for pending ISR notification
-    if (ulTaskNotifyTake(pdFALSE, 0) == 0)
-    {
-        return; // No notification pending
-    }
-
-    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    if ((now - mLastProcessedTime) < kProcessCooldownMs)
-    {
-        ESP_LOGI(TAG, "Fan button press ignored (cooldown: %lu ms since last)",
-                 now - mLastProcessedTime);
+    case FanSpeed::Off:
+        controlPin = kFanOffControlPin;
+        break;
+    case FanSpeed::Low:
+        controlPin = kFanLowControlPin;
+        break;
+    case FanSpeed::Medium:
+        controlPin = kFanMediumControlPin;
+        break;
+    case FanSpeed::High:
+        controlPin = kFanHighControlPin;
+        break;
+    default:
+        ESP_LOGE(TAG, "Invalid fan speed");
         return;
     }
-    mLastProcessedTime = now;
-
-    // Read LED to determine new state
-    bool isOn     = ReadLEDStatus();
-    FanSpeed prev = mCurrentSpeed;
-    mCurrentSpeed = isOn ? FanSpeed::High : FanSpeed::Off;
-
-    ESP_LOGI(TAG, "Fan button pressed: state %s -> %s",
-             prev == FanSpeed::High ? "ON" : "OFF",
-             mCurrentSpeed == FanSpeed::High ? "ON" : "OFF");
-
-    if (mStateChangeCallback)
+    
+    SendControlPulse(controlPin);
+    
+    // Small delay to let hardware respond
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Verify state changed by reading status pins
+    FanSpeed actualSpeed = ReadCurrentSpeed();
+    if (actualSpeed != speed)
     {
-        mStateChangeCallback();
+        ESP_LOGW(TAG, "Fan speed mismatch: expected %d, got %d", 
+                 static_cast<uint8_t>(speed), static_cast<uint8_t>(actualSpeed));
     }
+    
+    ESP_LOGI(TAG, "Fan speed set to %d", static_cast<uint8_t>(speed));
+}
+
+void FanController::SendControlPulse(gpio_num_t pin)
+{
+    // Send a pulse to trigger state change
+    gpio_set_level(pin, 1);
+    vTaskDelay(pdMS_TO_TICKS(500)); // 500ms pulse
+    gpio_set_level(pin, 0);
+}
+
+FanSpeed FanController::ReadCurrentSpeed()
+{
+    // Read the actual GPIO status pins to determine current speed (active-LOW: LOW=active)
+    int lowLevel = gpio_get_level(kFanLowStatusPin);
+    int mediumLevel = gpio_get_level(kFanMediumStatusPin);
+    int highLevel = gpio_get_level(kFanHighStatusPin);
+    
+    if (!highLevel)  // Active-LOW: 0 = active
+    {
+        return FanSpeed::High;
+    }
+    else if (!mediumLevel)  // Active-LOW: 0 = active
+    {
+        return FanSpeed::Medium;
+    }
+    else if (!lowLevel)  // Active-LOW: 0 = active
+    {
+        return FanSpeed::Low;
+    }
+    return FanSpeed::Off;  // All pins HIGH = off
 }
 
 FanSpeed FanController::GetSpeed()
 {
-    mCurrentSpeed = ReadLEDStatus() ? FanSpeed::High : FanSpeed::Off;
+    // Always read from hardware for most accurate state
+    mCurrentSpeed = ReadCurrentSpeed();
     return mCurrentSpeed;
 }
 
 bool FanController::IsOn()
 {
-    return ReadLEDStatus();
+    return mCurrentSpeed != FanSpeed::Off;
 }
 
 uint8_t FanController::GetPercentSpeed()
 {
-    return IsOn() ? 100 : 0;
+    switch (mCurrentSpeed)
+    {
+    case FanSpeed::Low:
+        return 33;
+    case FanSpeed::Medium:
+        return 66;
+    case FanSpeed::High:
+        return 100;
+    case FanSpeed::Off:
+    default:
+        return 0;
+    }
 }

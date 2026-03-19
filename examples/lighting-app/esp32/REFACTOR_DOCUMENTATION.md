@@ -9,7 +9,7 @@
 ## Overview
 This refactor transforms the ESP32 lighting-app into a production-ready multi-endpoint device with:
 - **Endpoint 1**: Light with 3 brightness levels (Off, Low, High)
-- **Endpoint 3**: Fan with 2 states (Off, On/High — binary on/off)
+- **Endpoint 3**: Fan with 4 speeds (Off, Low, Medium, High)
 
 **Matter Compliance**: Fully compliant with Matter 1.x specification including:
 - Groups cluster support on fan endpoint (group control capability)
@@ -26,24 +26,31 @@ This refactor transforms the ESP32 lighting-app into a production-ready multi-en
 | D0 | GPIO0 | Light control pulse | Output | 500ms pulse to cycle states |
 | D1 | GPIO1 | Light state interrupt | Input | Optocoupler inverted signal (rising edge when button activates) |
 | D2 | GPIO2 | Light power status | Input | Active-LOW with pull-up (LOW=ON) |
-| D3 | GPIO21 | Fan control pulse | Output | 500ms pulse to toggle on/off |
-| D4 | GPIO22 | Fan button interrupt | Input | Any-edge ISR (button press detection) |
-| D5 | GPIO23 | *Unused* | - | Now free |
+| D3 | GPIO21 | Fan Off control | Output | 500ms pulse to set fan off |
+| D4 | GPIO22 | Fan Low control | Output | 500ms pulse to set fan low |
+| D5 | GPIO23 | Fan Medium control | Output | 500ms pulse to set fan medium |
 | D6 | GPIO16 | Commissioning button | Input | Active-LOW with pull-up (press to pair) |
-| D7 | GPIO17 | Fan LED status | Input | Active-LOW with pull-up (LOW=fan ON) |
-| D8 | GPIO19 | *Unused* | - | Now free |
-| D9 | GPIO20 | *Unused* | - | Now free |
-| D10 | GPIO18 | *Unused* | - | Now free |
+| D7 | GPIO17 | Fan Low status | Input | Active-LOW with pull-up (LOW=low speed active) |
+| D8 | GPIO19 | Fan Medium status | Input | Active-LOW with pull-up (LOW=medium speed active) |
+| D9 | GPIO20 | Fan High status | Input | Active-LOW with pull-up (LOW=high speed active) |
+| D10 | GPIO18 | Fan High control | Output | 500ms pulse to set fan high |
 | - | GPIO15 | Commissioning LED | Output | Flashes at 2Hz when in pairing mode |
 
-### Fan Controller (3 pins: D3, D4, D7)
-**Fan is treated as binary: Off or On. Low/Medium states are not supported.**
+### Fan Controller (7 pins: D3-D5, D7-D10)
+**Fan has 4 speeds: Off (0%), Low (33%), Medium (66%), High (100%)**
 
-- **D3 (GPIO21)**: Fan control pulse (output, 500ms pulse to toggle on/off)
-- **D4 (GPIO22)**: Fan button interrupt (input, any-edge ISR — fires when the fan button is pressed)
-- **D7 (GPIO17)**: Fan LED status (input, active-LOW with pull-up: LOW = fan is ON)
+**Control Pins (output - send 500ms pulse to set speed):**
+- **D3 (GPIO21)**: Fan Off control
+- **D4 (GPIO22)**: Fan Low control
+- **D5 (GPIO23)**: Fan Medium control
+- **D10 (GPIO18)**: Fan High control (boot-safe, no strapping)
 
-Pins D5 (GPIO23), D8 (GPIO19), D9 (GPIO20), D10 (GPIO18) are now free for other use.
+**Status Pins (input - active-LOW with pull-up):**
+- **D7 (GPIO17)**: Low speed status (LOW = low speed active)
+- **D8 (GPIO19)**: Medium speed status (LOW = medium speed active)
+- **D9 (GPIO20)**: High speed status (LOW = high speed active)
+
+All three status pins HIGH = fan is OFF.
 
 ### Light Controller (3 pins: D0-D2)
 - **D0 (GPIO0)**: Light control pulse (output, 500ms pulse to cycle states)
@@ -63,9 +70,8 @@ Pins D5 (GPIO23), D8 (GPIO19), D9 (GPIO20), D10 (GPIO18) are now free for other 
 - **Availability**: GPIO15 is the XIAO ESP32C6 onboard user LED
 
 **Design Trade-offs:**
-- **I2C Communication**: D4 (GPIO22) used for fan interrupt (I2C unavailable on those pins)
-- **Fan simplification**: Binary on/off only; Low/Medium states removed for hardware reliability
-- **Freed pins**: D5 (GPIO23), D8 (GPIO19), D9 (GPIO20), D10 (GPIO18) are now available
+- **Fan pins**: D3-D5, D7-D10 used for 4-speed fan control (Off/Low/Medium/High)
+- **Light controller**: Pulse-until-off logic eliminates position tracking drift
 - **Avoided**: GPIO 3, 14 (RF switch), GPIO 9 (Boot)
 - **User LED**: GPIO15 used for commissioning status indicator
 - **Boot Safety**: D6 (GPIO16) is boot strapping pin (keep HIGH during boot with pull-up)
@@ -75,9 +81,9 @@ Pins D5 (GPIO23), D8 (GPIO19), D9 (GPIO20), D10 (GPIO18) are now free for other 
 ### New Components
 
 #### 1. FanController (`FanController.h/cpp`)
-- **Binary on/off** only — Off or High (100%). Low/Medium states intentionally ignored.
-- Interrupt-driven state detection: ISR fires on fan button press (D4/GPIO22, any-edge)
-- LED status feedback: reads D7/GPIO17 (active-LOW) to determine on/off state
+- **4-speed operation**: Off (0%), Low (33%), Medium (66%), High (100%)
+- Status pin feedback: reads D7/D8/D9 (active-LOW) to determine current speed
+- Pulse-based control: sends 500ms pulse to appropriate control pin (D3/D4/D5/D10) to set speed
 - Same debounce + cooldown strategy as LightController (50ms ISR debounce, 1000ms cooldown)
 - Control pulse: 500ms pulse on D3/GPIO21 to toggle fan state
 - State verification: reads LED pin 200ms after pulse to confirm change

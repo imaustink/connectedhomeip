@@ -114,72 +114,67 @@ exit:
 
 void AppDeviceCallbacks::OnFanControlAttributeChangeCallback(EndpointId endpointId, AttributeId attributeId, uint8_t * value)
 {
-    // Fan is binary: Off (0%) or On/High (100%). Medium/Low states are ignored.
     using namespace FanControl::Attributes;
-    static bool isSnapping = false;
-
+    static bool isSnapping = false;  // Prevent recursive snapping
+    
     VerifyOrExit(endpointId == kFanEndpointId, ESP_LOGE(TAG, "Unexpected EndPoint ID for FanControl: `0x%02x'", endpointId));
-
-    // Skip hardware update if triggered by UpdateClusterState (hardware -> Matter sync)
-    if (GetAppTask().IsUpdatingFromHardware())
-    {
-        ESP_LOGI(TAG, "Skipping FanControl hardware update (triggered by hardware state sync)");
-        goto exit;
-    }
-
-    if (attributeId == FanMode::Id)
-    {
-        uint8_t fanMode = *value;
-        ESP_LOGI(TAG, "Fan Mode requested: %d (0=Off, anything else=On/High)", fanMode);
-
-        // Binary mapping: 0 = Off, everything else = High (100%)
-        bool turnOn = (fanMode != 0);
-        FanSpeed speed   = turnOn ? FanSpeed::High : FanSpeed::Off;
-        uint8_t percent  = turnOn ? 100 : 0;
-
-        // Snap PercentSetting/PercentCurrent to match
-        chip::app::Clusters::FanControl::Attributes::PercentSetting::Set(kFanEndpointId, percent);
-        chip::app::Clusters::FanControl::Attributes::PercentCurrent::Set(kFanEndpointId, percent);
-        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentSetting::Id);
-        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentCurrent::Id);
-
-        DeviceMgr().SetFanSpeed(speed);
-    }
-    else if (attributeId == PercentSetting::Id)
+    
+    if (attributeId == PercentSetting::Id)
     {
         uint8_t percentSpeed = *value;
-        ESP_LOGI(TAG, "Fan PercentSetting requested: %d%%", percentSpeed);
-
+        uint8_t snappedPercent;
+        ESP_LOGI(TAG, "Fan Speed requested: %d%%", percentSpeed);
+        
+        // Skip snapping if we're already in a snap operation (prevents recursive callbacks)
         if (isSnapping)
         {
-            ESP_LOGI(TAG, "Skipping fan snap (recursive)");
+            ESP_LOGI(TAG, "Skipping fan snap (recursive call from snap operation)");
             goto exit;
         }
-
-        // Binary snap: 0 = Off, 1-100 = High (100%)
-        FanSpeed speed      = (percentSpeed == 0) ? FanSpeed::Off : FanSpeed::High;
-        uint8_t snappedPct  = (percentSpeed == 0) ? 0 : 100;
-
-        // Avoid feedback loop when hardware is already at the target
-        if (DeviceMgr().GetFanSpeed() == speed)
+        
+        // Snap to discrete levels: 0%, 33%, 66%, 100%
+        FanSpeed speed;
+        if (percentSpeed == 0)
         {
-            ESP_LOGI(TAG, "Fan already %s, skipping hardware update", speed == FanSpeed::Off ? "Off" : "On");
+            snappedPercent = 0;
+            speed = FanSpeed::Off;
+        }
+        else if (percentSpeed <= 50)  // 1-50 -> 33% (low)
+        {
+            snappedPercent = 33;
+            speed = FanSpeed::Low;
+        }
+        else if (percentSpeed <= 83)  // 51-83 -> 66% (medium)
+        {
+            snappedPercent = 66;
+            speed = FanSpeed::Medium;
+        }
+        else  // 84-100 -> 100% (high)
+        {
+            snappedPercent = 100;
+            speed = FanSpeed::High;
+        }
+        
+        // Check if hardware already at this speed (avoid feedback loop from UpdateClusterState)
+        FanSpeed currentSpeed = DeviceMgr().GetFanSpeed();
+        if (currentSpeed == speed)
+        {
+            ESP_LOGI(TAG, "Fan already at requested speed %d, skipping hardware update", static_cast<uint8_t>(speed));
             goto exit;
         }
-
+        
+        // Update the cluster to reflect the snapped speed if it changed (already on Matter thread)
+        if (snappedPercent != percentSpeed)
+        {
+            ESP_LOGI(TAG, "Snapping fan speed from %d%% to %d%%", percentSpeed, snappedPercent);
+            isSnapping = true;  // Set flag to prevent recursive snap
+            chip::app::Clusters::FanControl::Attributes::PercentSetting::Set(kFanEndpointId, snappedPercent);
+            chip::app::Clusters::FanControl::Attributes::PercentCurrent::Set(kFanEndpointId, snappedPercent);
+            isSnapping = false;  // Clear flag
+        }
+        
+        ESP_LOGI(TAG, "Setting fan hardware to speed: %d", static_cast<uint8_t>(speed));
         DeviceMgr().SetFanSpeed(speed);
-
-        // Snap the reported value back if it differed (e.g. controller sent 50%)
-        if (snappedPct != percentSpeed)
-        {
-            ESP_LOGI(TAG, "Snapping fan percent from %d to %d", percentSpeed, snappedPct);
-            isSnapping = true;
-            chip::app::Clusters::FanControl::Attributes::PercentSetting::Set(kFanEndpointId, snappedPct);
-            chip::app::Clusters::FanControl::Attributes::PercentCurrent::Set(kFanEndpointId, snappedPct);
-            MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentSetting::Id);
-            MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentCurrent::Id);
-            isSnapping = false;
-        }
     }
     else
     {

@@ -209,9 +209,6 @@ void AppTask::AppTaskMain(void * pvParameter)
         
         // Check for hardware state changes from interrupts (non-blocking)
         DeviceMgr().GetLightController().NotifyStateChange();
-
-        // Check for fan button-press interrupts (non-blocking, mirrors light approach)
-        DeviceMgr().GetFanController().NotifyStateChange();
         
         // Monitor commissioning window state
         static bool sWasCommissioningWindowOpen = false;

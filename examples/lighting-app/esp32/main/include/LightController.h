@@ -88,5 +88,6 @@ private:
     void SynchronizeOnStartup();
     
     static void IRAM_ATTR StateChangeISR(void * arg);
+    static void IRAM_ATTR StatusLEDChangeISR(void * arg);
     static void DebounceTimerCallback(TimerHandle_t timer);
 };

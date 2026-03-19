@@ -4265,20 +4265,20 @@
     },
     {
       "id": 2,
-      "name": "MA-dimmablelight",
+      "name": "MA-onofflight",
       "deviceTypeRef": {
-        "code": 257,
+        "code": 256,
         "profileId": 259,
-        "label": "MA-dimmablelight",
-        "name": "MA-dimmablelight",
+        "label": "MA-onofflight",
+        "name": "MA-onofflight",
         "deviceTypeOrder": 0
       },
       "deviceTypes": [
         {
-          "code": 257,
+          "code": 256,
           "profileId": 259,
-          "label": "MA-dimmablelight",
-          "name": "MA-dimmablelight",
+          "label": "MA-onofflight",
+          "name": "MA-onofflight",
           "deviceTypeOrder": 0
         }
       ],
@@ -4286,10 +4286,10 @@
         4
       ],
       "deviceIdentifiers": [
-        257
+        256
       ],
-      "deviceTypeName": "MA-dimmablelight",
-      "deviceTypeCode": 257,
+      "deviceTypeName": "MA-onofflight",
+      "deviceTypeCode": 256,
       "deviceTypeProfileId": 259,
       "clusters": [
         {
@@ -4846,7 +4846,7 @@
           "mfgCode": null,
           "define": "LEVEL_CONTROL_CLUSTER",
           "side": "server",
-          "enabled": 1,
+          "enabled": 0,
           "commands": [
             {
               "name": "MoveToLevel",
@@ -6930,7 +6930,7 @@
               "storageOption": "RAM",
               "singleton": 0,
               "bounded": 0,
-              "defaultValue": "2",
+              "defaultValue": "5",
               "reportable": 1,
               "minInterval": 1,
               "maxInterval": 65534,
@@ -6974,7 +6974,7 @@
               "mfgCode": null,
               "side": "server",
               "type": "int8u",
-              "included": 1,
+              "included": 0,
               "storageOption": "RAM",
               "singleton": 0,
               "bounded": 0,
@@ -6990,7 +6990,7 @@
               "mfgCode": null,
               "side": "server",
               "type": "int8u",
-              "included": 1,
+              "included": 0,
               "storageOption": "RAM",
               "singleton": 0,
               "bounded": 0,
@@ -7006,7 +7006,7 @@
               "mfgCode": null,
               "side": "server",
               "type": "int8u",
-              "included": 1,
+              "included": 0,
               "storageOption": "RAM",
               "singleton": 0,
               "bounded": 0,
@@ -7090,7 +7090,7 @@
               "storageOption": "RAM",
               "singleton": 0,
               "bounded": 0,
-              "defaultValue": "1",
+              "defaultValue": "4",
               "reportable": 1,
               "minInterval": 1,
               "maxInterval": 65534,
@@ -7111,7 +7111,7 @@
       "parentEndpointIdentifier": null
     },
     {
-      "endpointTypeName": "MA-dimmablelight",
+      "endpointTypeName": "MA-onofflight",
       "endpointTypeIndex": 1,
       "profileId": 259,
       "endpointId": 1,

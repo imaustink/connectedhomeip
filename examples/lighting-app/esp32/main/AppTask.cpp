@@ -122,6 +122,12 @@ CHIP_ERROR AppTask::Init()
 
     AppLED.Init();
     
+    // Suppress non-critical errors during boot and operation
+    // These are timing-related issues that resolve automatically as the network comes up
+    esp_log_level_set("chip[DIS]", ESP_LOG_NONE);  // mDNS timeouts when Thread network isn't ready
+    esp_log_level_set("chip[DMG]", ESP_LOG_NONE);  // "Not implemented" responses for optional attributes
+    esp_log_level_set("chip[DL]", ESP_LOG_NONE);   // SRP timeouts and "long dispatch" warnings from network latency
+    
     // Initialize device manager for fan and light
     err = DeviceMgr().Init();
     if (err != CHIP_NO_ERROR)
@@ -203,6 +209,9 @@ void AppTask::AppTaskMain(void * pvParameter)
         
         // Check for hardware state changes from interrupts (non-blocking)
         DeviceMgr().GetLightController().NotifyStateChange();
+
+        // Check for fan button-press interrupts (non-blocking, mirrors light approach)
+        DeviceMgr().GetFanController().NotifyStateChange();
         
         // Monitor commissioning window state
         static bool sWasCommissioningWindowOpen = false;
@@ -213,22 +222,6 @@ void AppTask::AppTaskMain(void * pvParameter)
             StopCommissioningLEDFlash();
         }
         sWasCommissioningWindowOpen = isCommissioningWindowOpen;
-        
-        // Poll fan state for changes (fan uses status pins, not interrupts)
-        static FanSpeed sLastFanSpeed = FanSpeed::Off;
-        FanSpeed currentFanSpeed = DeviceMgr().GetFanSpeed();
-        if (currentFanSpeed != sLastFanSpeed)
-        {
-            ESP_LOGI(TAG, "*** Fan state changed: %d -> %d ***", 
-                     static_cast<uint8_t>(sLastFanSpeed), 
-                     static_cast<uint8_t>(currentFanSpeed));
-            sLastFanSpeed = currentFanSpeed;
-            
-            // Update Matter clusters on Matter thread
-            chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
-                sAppTask.UpdateClusterState();
-            });
-        }
     }
 }
 
@@ -347,19 +340,11 @@ void AppTask::UpdateClusterState()
                                                Clusters::FanControl::Attributes::PercentCurrent::Id);
     }
     
-    // Update FanMode to match the speed (important for controllers that rely on FanMode)
+    // Fan is binary: Off or High (100%). Map accordingly.
     chip::app::Clusters::FanControl::FanModeEnum fanMode;
     if (fanSpeed == 0)
     {
         fanMode = chip::app::Clusters::FanControl::FanModeEnum::kOff;
-    }
-    else if (fanSpeed <= 33)
-    {
-        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kLow;
-    }
-    else if (fanSpeed <= 66)
-    {
-        fanMode = chip::app::Clusters::FanControl::FanModeEnum::kMedium;
     }
     else
     {
@@ -422,9 +407,14 @@ CHIP_ERROR AppTask::InitCommissioningButton()
         return CHIP_ERROR_INTERNAL;
     }
     
-    // Install ISR service if not already installed (may already be installed by display buttons)
+    // Install ISR service if not already installed (may already be installed by display or LED code)
+    // Note: ESP-IDF logs "GPIO isr service already installed" internally, which is harmless
     err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    if (err == ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGI(TAG, "GPIO ISR service already installed (expected)");
+    }
+    else if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "GPIO ISR service install failed: %s", esp_err_to_name(err));
         return CHIP_ERROR_INTERNAL;

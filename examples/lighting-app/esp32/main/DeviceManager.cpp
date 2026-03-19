@@ -30,14 +30,22 @@ CHIP_ERROR DeviceManager::Init()
     mFanController.Init();
     mLightController.Init();
     
-    // Set callback for light state changes (button presses and Matter commands)
+    // Forward fan button-press state changes to the main callback
+    mFanController.SetStateChangeCallback([this]() {
+        if (mStateChangeCallback)
+        {
+            mStateChangeCallback();
+        }
+    });
+
+    // Forward light button-press state changes to the main callback
     mLightController.SetStateChangeCallback([this]() {
         if (mStateChangeCallback)
         {
             mStateChangeCallback();
         }
     });
-    
+
     ESP_LOGI(TAG, "DeviceManager initialized successfully");
     return CHIP_NO_ERROR;
 }

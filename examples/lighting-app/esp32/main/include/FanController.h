@@ -20,38 +20,57 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <functional>
 
+// Fan is treated as binary: Off or On (High/100%).
+// Medium/Low states are intentionally not supported.
 enum class FanSpeed : uint8_t
 {
-    Off    = 0,
-    Low    = 1,
-    Medium = 2,
-    High   = 3
+    Off  = 0,
+    High = 3  // Only on state - maps to 100%
 };
 
 class FanController
 {
 public:
+    using StateChangeCallback = std::function<void()>;
+
     void Init();
     void SetSpeed(FanSpeed speed);
     FanSpeed GetSpeed();
     bool IsOn();
     uint8_t GetPercentSpeed();
 
-private:
-    FanSpeed mCurrentSpeed;
-    
-    // GPIO pins for fan speed control (output - pulse to set state) [XIAO ESP32C6 D3-D6]
-    static constexpr gpio_num_t kFanOffControlPin    = GPIO_NUM_21; // D3
-    static constexpr gpio_num_t kFanLowControlPin    = GPIO_NUM_22; // D4
-    static constexpr gpio_num_t kFanMediumControlPin = GPIO_NUM_23; // D5
-    static constexpr gpio_num_t kFanHighControlPin   = GPIO_NUM_18; // D10 (boot-safe, no strapping)
-    
-    // GPIO pins for fan status feedback (input - active-LOW with pull-up) [XIAO ESP32C6 D7-D9]
-    static constexpr gpio_num_t kFanLowStatusPin    = GPIO_NUM_17; // D7
-    static constexpr gpio_num_t kFanMediumStatusPin = GPIO_NUM_19; // D8
-    static constexpr gpio_num_t kFanHighStatusPin   = GPIO_NUM_20; // D9
+    // Called by ISR to notify a button-press state change
+    void NotifyStateChange();
 
-    void SendControlPulse(gpio_num_t pin);
-    FanSpeed ReadCurrentSpeed();
+    void SetStateChangeCallback(StateChangeCallback callback) { mStateChangeCallback = callback; }
+
+private:
+    FanSpeed mCurrentSpeed = FanSpeed::Off;
+    TaskHandle_t mTaskHandle = nullptr;
+    StateChangeCallback mStateChangeCallback;
+
+    // Debouncing (mirrors LightController approach)
+    volatile uint32_t mLastInterruptTime  = 0;
+    volatile uint32_t mLastProcessedTime  = 0;
+    static constexpr uint32_t kDebounceMs        = 50;    // ISR hardware debounce
+    static constexpr uint32_t kProcessCooldownMs = 1000;  // Cooldown after processing
+
+    // GPIO pin assignments [XIAO ESP32C6]
+    // D3 (GPIO21): control pulse output - pulse to toggle fan on/off
+    // D4 (GPIO22): button interrupt input - fires when fan button is pressed
+    // D7 (GPIO17): LED status input - active-LOW with pull-up (LOW = fan is ON)
+    static constexpr gpio_num_t kFanControlPin   = GPIO_NUM_21; // D3 - output
+    static constexpr gpio_num_t kFanInterruptPin = GPIO_NUM_22; // D4 - input, ISR
+    static constexpr gpio_num_t kFanLEDStatusPin = GPIO_NUM_17; // D7 - input, LED status
+
+    static constexpr uint32_t kPulseDurationMs = 500;
+
+    void SendControlPulse();
+    bool ReadLEDStatus(); // true = fan is ON
+
+    static void IRAM_ATTR FanButtonISR(void * arg);
 };

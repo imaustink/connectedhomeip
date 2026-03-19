@@ -35,7 +35,7 @@ void IRAM_ATTR LightController::StateChangeISR(void * arg)
         return;
     }
     
-    ESP_EARLY_LOGI(TAG, "ISR: Interrupt fired!");
+    ESP_EARLY_LOGI(TAG, "ISR: Button interrupt fired!");
     
     // Debounce: check if enough time has passed since last interrupt
     uint32_t currentTime = xTaskGetTickCountFromISR();
@@ -65,6 +65,48 @@ void IRAM_ATTR LightController::StateChangeISR(void * arg)
     else
     {
         ESP_EARLY_LOGI(TAG, "ISR: Task handle is null");
+    }
+}
+
+void IRAM_ATTR LightController::StatusLEDChangeISR(void * arg)
+{
+    LightController * controller = static_cast<LightController *>(arg);
+    if (controller == nullptr)
+    {
+        ESP_EARLY_LOGI(TAG, "Status ISR: controller is null");
+        return;
+    }
+    
+    ESP_EARLY_LOGI(TAG, "Status ISR: LED state changed!");
+    
+    // Debounce: check if enough time has passed since last interrupt
+    uint32_t currentTime = xTaskGetTickCountFromISR();
+    uint32_t timeSinceLastInterrupt = currentTime - controller->mLastInterruptTime;
+    
+    // Convert debounce time to ticks
+    uint32_t debounceTicks = pdMS_TO_TICKS(kDebounceMs);
+    
+    if (timeSinceLastInterrupt < debounceTicks)
+    {
+        // Ignore this interrupt - too soon after previous one
+        ESP_EARLY_LOGI(TAG, "Status ISR: Debounced (too soon)");
+        return;
+    }
+    
+    // Update last interrupt time
+    controller->mLastInterruptTime = currentTime;
+    
+    // Notify the controller's task (ISR-safe)
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+    if (controller->mTaskHandle != nullptr)
+    {
+        vTaskNotifyGiveFromISR(controller->mTaskHandle, &higherPriorityTaskWoken);
+        portYIELD_FROM_ISR(higherPriorityTaskWoken);
+        ESP_EARLY_LOGI(TAG, "Status ISR: Task notified");
+    }
+    else
+    {
+        ESP_EARLY_LOGI(TAG, "Status ISR: Task handle is null");
     }
 }
 
@@ -121,17 +163,19 @@ bool LightController::Init()
     gpio_config(&int_conf);
     
     // Configure status pin (active LOW - pulled to ground when light is on)
+    // NOW WITH INTERRUPT to detect LED state changes automatically
     gpio_config_t status_conf = {};
-    status_conf.intr_type     = GPIO_INTR_DISABLE;
+    status_conf.intr_type     = GPIO_INTR_ANYEDGE;  // Trigger on both rising and falling edges
     status_conf.mode          = GPIO_MODE_INPUT;
     status_conf.pin_bit_mask  = (1ULL << kLightPowerStatusPin);
     status_conf.pull_down_en  = GPIO_PULLDOWN_DISABLE;
     status_conf.pull_up_en    = GPIO_PULLUP_ENABLE;  // Pull-up makes pin HIGH when not driven
     gpio_config(&status_conf);
 
-    // Install ISR service and add handler
+    // Install ISR service and add handlers
     gpio_install_isr_service(0);
     gpio_isr_handler_add(kLightInterruptPin, StateChangeISR, this);
+    gpio_isr_handler_add(kLightPowerStatusPin, StatusLEDChangeISR, this);
 
     ESP_LOGI(TAG, "Light controller initialized");
     ESP_LOGI(TAG, "Interrupt pin (GPIO %d) initial level: %d", kLightInterruptPin, gpio_get_level(kLightInterruptPin));
@@ -374,73 +418,83 @@ void LightController::CycleToTargetLevel()
     // This prevents treating hardware responses to our control pulses as button presses
     mUpdatingFromHardware = true;
 
-    // Calculate number of pulses needed
-    // State cycle: Off (0) → High (2) → Low (1) → Off (0)
-    // Mapping: Off=0, Low=1, High=2
-    // Actual cycle order by index: 0 → 2 → 1 → 0
-    uint8_t currentIdx = static_cast<uint8_t>(mCurrentLevel);
-    uint8_t targetIdx  = static_cast<uint8_t>(mTargetLevel);
-    
-    // Calculate the number of steps forward in the cycle
-    uint8_t numPulses = 0;
-    if (targetIdx == currentIdx)
+    const int kMaxPulses = 3; // Cycle has 3 states, so 3 pulses always guarantees off
+    int pulseCount = 0;
+
+    if (mTargetLevel == LightLevel::Off)
     {
-        // Already at target
-        mUpdatingFromHardware = false;
-        xSemaphoreGive(mSyncMutex);
-        return;
+        // We cannot reliably know if we are at Low or High, so we cannot calculate a
+        // fixed pulse count. Instead, pulse until the status pin confirms off.
+        ReadPowerStatus();
+        while (mPowerStatus && pulseCount < kMaxPulses)
+        {
+            pulseCount++;
+            ESP_LOGI(TAG, "Off pulse %d: sending...", pulseCount);
+            SendPulse();
+            vTaskDelay(pdMS_TO_TICKS(kPowerReadDelayMs));
+            ReadPowerStatus();
+            ESP_LOGI(TAG, "Off pulse %d: status is now %s", pulseCount, mPowerStatus ? "ON" : "OFF");
+        }
+
+        if (mPowerStatus)
+        {
+            ESP_LOGE(TAG, "Failed to turn off after %d pulses - hardware may be stuck!", pulseCount);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Reached OFF after %d pulse%s", pulseCount, pulseCount == 1 ? "" : "s");
+        }
+        mCurrentLevel = LightLevel::Off;
     }
-    
-    // Map enum values to cycle positions: Off(0)→pos0, High(2)→pos1, Low(1)→pos2
-    auto getCyclePos = [](uint8_t level) -> uint8_t {
-        if (level == 0) return 0;      // Off → position 0
-        if (level == 2) return 1;      // High → position 1  
-        if (level == 1) return 2;      // Low → position 2
-        return 0;
-    };
-    
-    uint8_t currentPos = getCyclePos(currentIdx);
-    uint8_t targetPos = getCyclePos(targetIdx);
-    
-    if (targetPos > currentPos) {
-        numPulses = targetPos - currentPos;
-    } else {
-        numPulses = 3 - currentPos + targetPos;  // Wrap around
-    }
-    
-    ESP_LOGI(TAG, "Cycling from level %d (pos %d) to %d (pos %d): %d pulses", 
-             currentIdx, currentPos, targetIdx, targetPos, numPulses);
-    
-    // Send all pulses WITHOUT updating mCurrentLevel yet
-    // This prevents other code from seeing intermediate states
-    for (uint8_t i = 0; i < numPulses; i++)
+    else
     {
-        SendPulse();
-    }
-    
-    // Wait for hardware to stabilize after last pulse
-    vTaskDelay(pdMS_TO_TICKS(kPowerReadDelayMs));
-    ReadPowerStatus();
-    
-    // NOW update mCurrentLevel to match the target (all pulses sent)
-    mCurrentLevel = mTargetLevel;
-    
-    // Verify we actually reached the target
-    if (mTargetLevel == LightLevel::Off && mPowerStatus)
-    {
-        ESP_LOGW(TAG, "Expected Off state but power is still on, sending additional pulse");
-        SendPulse();
+        // For an On target (Low or High), first pulse-to-off so we have a known
+        // starting position, then send the exact number of pulses to reach the target.
+        // Cycle order from Off: Off → High (1 pulse) → Low (2 pulses)
+        ReadPowerStatus();
+        while (mPowerStatus && pulseCount < kMaxPulses)
+        {
+            pulseCount++;
+            ESP_LOGI(TAG, "Pre-off pulse %d: sending to reach known Off state", pulseCount);
+            SendPulse();
+            vTaskDelay(pdMS_TO_TICKS(kPowerReadDelayMs));
+            ReadPowerStatus();
+        }
+
+        if (mPowerStatus)
+        {
+            ESP_LOGE(TAG, "Could not reach Off before cycling to target - aborting");
+            mUpdatingFromHardware = false;
+            xSemaphoreGive(mSyncMutex);
+            return;
+        }
+
+        // Now in confirmed Off state; send the required pulses for target
+        uint8_t pulsesForTarget = (mTargetLevel == LightLevel::High) ? 1 : 2;
+        ESP_LOGI(TAG, "At confirmed Off; sending %d pulse%s to reach level %d",
+                 pulsesForTarget, pulsesForTarget == 1 ? "" : "s",
+                 static_cast<uint8_t>(mTargetLevel));
+
+        for (uint8_t i = 0; i < pulsesForTarget; i++)
+        {
+            SendPulse();
+        }
+
         vTaskDelay(pdMS_TO_TICKS(kPowerReadDelayMs));
         ReadPowerStatus();
-        mCurrentLevel = LightLevel::Off;
+
+        if (!mPowerStatus)
+        {
+            ESP_LOGW(TAG, "Expected On state after cycling but power is off - trusting hardware");
+            mCurrentLevel = LightLevel::Off;
+        }
+        else
+        {
+            mCurrentLevel = mTargetLevel;
+            ESP_LOGI(TAG, "Reached level %d", static_cast<uint8_t>(mCurrentLevel));
+        }
     }
-    else if (mTargetLevel != LightLevel::Off && !mPowerStatus)
-    {
-        ESP_LOGW(TAG, "Expected On state but power is off");
-        // Hardware disagrees - trust hardware
-        mCurrentLevel = LightLevel::Off;
-    }
-    
+
     // Clear the flag - allow NotifyStateChange() to process button presses again
     mUpdatingFromHardware = false;
     

@@ -39,6 +39,9 @@ public:
     bool IsFanOn();
     uint8_t GetFanPercentSpeed();
     
+    // Fan accessor (for ISR notification polling in AppTask)
+    FanController & GetFanController() { return mFanController; }
+
     // Light control
     void SetLightLevel(LightLevel level);
     LightLevel GetLightLevel();

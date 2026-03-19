@@ -57,10 +57,6 @@ void AppDeviceCallbacks::PostAttributeChangeCallback(EndpointId endpointId, Clus
         OnOnOffPostAttributeChangeCallback(endpointId, attributeId, value);
         break;
 
-    case LevelControl::Id:
-        OnLevelControlAttributeChangeCallback(endpointId, attributeId, value);
-        break;
-
     case FanControl::Id:
         OnFanControlAttributeChangeCallback(endpointId, attributeId, value);
         break;
@@ -116,265 +112,73 @@ exit:
     return;
 }
 
-void AppDeviceCallbacks::OnLevelControlAttributeChangeCallback(EndpointId endpointId, AttributeId attributeId, uint8_t * value)
-{
-    uint8_t brightness;
-    uint8_t snappedLevel;
-    static bool isSnapping = false;  // Prevent recursive snapping
-    bool onOffState = false;
-    chip::app::DataModel::Nullable<uint8_t> currentLevel;
-    
-    VerifyOrExit(attributeId == LevelControl::Attributes::CurrentLevel::Id,
-                 ESP_LOGI(TAG, "Unhandled Attribute ID: '0x%" PRIx32 "'", attributeId));
-    VerifyOrExit(endpointId == kLightEndpointId, ESP_LOGE(TAG, "Unexpected EndPoint ID for LevelControl: `0x%02x'", endpointId));
-    
-    // Skip hardware update if this callback was triggered by UpdateClusterState (hardware -> Matter)
-    if (GetAppTask().IsUpdatingFromHardware())
-    {
-        ESP_LOGI(TAG, "Skipping LevelControl hardware update (triggered by hardware state sync)");
-        goto exit;
-    }
-
-    brightness = *value;
-    ESP_LOGI(TAG, "Light Level requested: %d", brightness);
-    
-    // Check OnOff state - if light should be on at High level, ignore level=1 requests
-    // This prevents the default restore level from overriding voice "turn on" commands
-    chip::app::Clusters::OnOff::Attributes::OnOff::Get(kLightEndpointId, &onOffState);
-    chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Get(kLightEndpointId, currentLevel);
-    
-    // If OnOff just turned on and set level to 254 (High), but now level=1 arrives, ignore it
-    // This is Matter's default restore behavior conflicting with our "turn on = High" preference
-    if (onOffState && !currentLevel.IsNull() && currentLevel.Value() == 254 && brightness == 1)
-    {
-        ESP_LOGI(TAG, "Ignoring level=1 request (light already set to High by OnOff)");
-        goto exit;
-    }
-    
-    // Skip snapping if we're already in a snap operation (prevents recursive callbacks)
-    if (isSnapping)
-    {
-        ESP_LOGI(TAG, "Skipping snap (recursive call from snap operation)");
-        AppLED.SetBrightness(brightness);
-        goto exit;
-    }
-    
-    // Snap to discrete levels: 0% (off), 50% (low), 100% (high)
-    // Matter level range: 1-254 (0 is off)
-    // Snap to: 0 (off), 127 (50%), 254 (100%)
-    if (brightness == 0)
-    {
-        snappedLevel = 0;
-    }
-    else if (brightness <= 190)  // 1-190 -> 50% (low)
-    {
-        snappedLevel = 127;  // 50% of 254
-    }
-    else  // 191-254 -> 100% (high)
-    {
-        snappedLevel = 254;  // 100%
-    }
-    
-    // Update the cluster to reflect the snapped level if it changed (already on Matter thread)
-    if (snappedLevel != brightness)
-    {
-        ESP_LOGI(TAG, "Snapping brightness from %d to %d", brightness, snappedLevel);
-        isSnapping = true;  // Set flag to prevent recursive snap
-        chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Set(kLightEndpointId, snappedLevel);
-        isSnapping = false;  // Clear flag
-        
-        // Immediately notify subscribers of the snapped value (don't wait for hardware)
-        // This ensures controllers see the correct state instantly
-        MatterReportingAttributeChangeCallback(kLightEndpointId, LevelControl::Id, 
-                                              LevelControl::Attributes::CurrentLevel::Id);
-        ESP_LOGI(TAG, "Triggered immediate attribute report for snapped value");
-    }
-    
-    // Apply the SNAPPED level to hardware (not the original requested level)
-    // This ensures the debounce timer stores the snapped value
-    if (snappedLevel == 0)
-    {
-        DeviceMgr().SetLightLevel(LightLevel::Off);
-    }
-    else if (snappedLevel <= 190)  // 127 snaps to Low
-    {
-        DeviceMgr().SetLightLevel(LightLevel::Low);
-    }
-    else  // 254 snaps to High
-    {
-        DeviceMgr().SetLightLevel(LightLevel::High);
-    }
-    
-    AppLED.SetBrightness(snappedLevel);
-
-exit:
-    return;
-}
-
 void AppDeviceCallbacks::OnFanControlAttributeChangeCallback(EndpointId endpointId, AttributeId attributeId, uint8_t * value)
 {
+    // Fan is binary: Off (0%) or On/High (100%). Medium/Low states are ignored.
     using namespace FanControl::Attributes;
-    static bool isSnapping = false;  // Prevent recursive snapping
-    static TimerHandle_t sFanDebounceTimer = NULL;
-    static FanSpeed sPendingFanSpeed = FanSpeed::Off;
-    
+    static bool isSnapping = false;
+
     VerifyOrExit(endpointId == kFanEndpointId, ESP_LOGE(TAG, "Unexpected EndPoint ID for FanControl: `0x%02x'", endpointId));
-    
-    // Skip hardware update if this callback was triggered by UpdateClusterState (hardware -> Matter)
+
+    // Skip hardware update if triggered by UpdateClusterState (hardware -> Matter sync)
     if (GetAppTask().IsUpdatingFromHardware())
     {
         ESP_LOGI(TAG, "Skipping FanControl hardware update (triggered by hardware state sync)");
         goto exit;
     }
-    
+
     if (attributeId == FanMode::Id)
     {
         uint8_t fanMode = *value;
-        ESP_LOGI(TAG, "Fan Mode requested: %d (0=Off, 1=Low, 2=Med, 3=High, 4=On, 5=Auto, 6=Smart)", fanMode);
-        
-        // FanMode values: Off=0, Low=1, Medium=2, High=3, On=4, Auto=5, Smart=6
-        FanSpeed speed;
-        uint8_t percent;
-        
-        switch (fanMode)
-        {
-            case 0:  // Off
-                speed = FanSpeed::Off;
-                percent = 0;
-                ESP_LOGI(TAG, "FanMode Off -> 0%%");
-                break;
-            case 1:  // Low
-                speed = FanSpeed::Low;
-                percent = 33;
-                ESP_LOGI(TAG, "FanMode Low -> 33%%");
-                break;
-            case 2:  // Medium
-                speed = FanSpeed::Medium;
-                percent = 66;
-                ESP_LOGI(TAG, "FanMode Medium -> 66%%");
-                break;
-            case 3:  // High
-                speed = FanSpeed::High;
-                percent = 100;
-                ESP_LOGI(TAG, "FanMode High -> 100%%");
-                break;
-            case 4:  // On (generic on - default to Low)
-                speed = FanSpeed::Low;
-                percent = 33;
-                ESP_LOGI(TAG, "FanMode On -> 33%% (Low)");
-                break;
-            default:  // Auto, Smart, etc. - not supported
-                ESP_LOGI(TAG, "FanMode %d not supported, ignoring", fanMode);
-                goto exit;
-        }
-        
-        // Update PercentSetting/PercentCurrent to match FanMode
+        ESP_LOGI(TAG, "Fan Mode requested: %d (0=Off, anything else=On/High)", fanMode);
+
+        // Binary mapping: 0 = Off, everything else = High (100%)
+        bool turnOn = (fanMode != 0);
+        FanSpeed speed   = turnOn ? FanSpeed::High : FanSpeed::Off;
+        uint8_t percent  = turnOn ? 100 : 0;
+
+        // Snap PercentSetting/PercentCurrent to match
         chip::app::Clusters::FanControl::Attributes::PercentSetting::Set(kFanEndpointId, percent);
         chip::app::Clusters::FanControl::Attributes::PercentCurrent::Set(kFanEndpointId, percent);
-        
-        // Immediately notify subscribers
-        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, 
-                                              FanControl::Attributes::PercentSetting::Id);
-        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, 
-                                              FanControl::Attributes::PercentCurrent::Id);
-        
-        // Apply to hardware (with debounce for on, immediate for off)
-        if (speed == FanSpeed::Off)
-        {
-            DeviceMgr().SetFanSpeed(FanSpeed::Off);
-        }
-        else
-        {
-            // Store pending speed and reset timer (same debounce as PercentSetting)
-            sPendingFanSpeed = speed;
-            if (sFanDebounceTimer != NULL)
-            {
-                xTimerReset(sFanDebounceTimer, 0);
-                ESP_LOGI(TAG, "Fan hardware update debounced (300ms), pending speed: %d", static_cast<uint8_t>(speed));
-            }
-            else
-            {
-                // Fallback if timer not created yet
-                DeviceMgr().SetFanSpeed(speed);
-            }
-        }
+        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentSetting::Id);
+        MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentCurrent::Id);
+
+        DeviceMgr().SetFanSpeed(speed);
     }
     else if (attributeId == PercentSetting::Id)
     {
         uint8_t percentSpeed = *value;
-        uint8_t snappedPercent;
-        ESP_LOGI(TAG, "Fan Speed requested: %d%%", percentSpeed);
-        
-        // Skip snapping if we're already in a snap operation (prevents recursive callbacks)
+        ESP_LOGI(TAG, "Fan PercentSetting requested: %d%%", percentSpeed);
+
         if (isSnapping)
         {
-            ESP_LOGI(TAG, "Skipping fan snap (recursive call from snap operation)");
+            ESP_LOGI(TAG, "Skipping fan snap (recursive)");
             goto exit;
         }
-        
-        // Snap to discrete levels: 0%, 33%, 66%, 100%
-        FanSpeed speed;
-        if (percentSpeed == 0)
+
+        // Binary snap: 0 = Off, 1-100 = High (100%)
+        FanSpeed speed      = (percentSpeed == 0) ? FanSpeed::Off : FanSpeed::High;
+        uint8_t snappedPct  = (percentSpeed == 0) ? 0 : 100;
+
+        // Avoid feedback loop when hardware is already at the target
+        if (DeviceMgr().GetFanSpeed() == speed)
         {
-            snappedPercent = 0;
-            speed = FanSpeed::Off;
-        }
-        else if (percentSpeed <= 50)  // 1-50 -> 33% (low)
-        {
-            snappedPercent = 33;
-            speed = FanSpeed::Low;
-        }
-        else if (percentSpeed <= 83)  // 51-83 -> 66% (medium)
-        {
-            snappedPercent = 66;
-            speed = FanSpeed::Medium;
-        }
-        else  // 84-100 -> 100% (high)
-        {
-            snappedPercent = 100;
-            speed = FanSpeed::High;
-        }
-        
-        // Check if hardware already at this speed (avoid feedback loop from UpdateClusterState)
-        FanSpeed currentSpeed = DeviceMgr().GetFanSpeed();
-        if (currentSpeed == speed)
-        {
-            ESP_LOGI(TAG, "Fan already at requested speed %d, skipping hardware update", static_cast<uint8_t>(speed));
+            ESP_LOGI(TAG, "Fan already %s, skipping hardware update", speed == FanSpeed::Off ? "Off" : "On");
             goto exit;
         }
-        
-        // Apply hardware change immediately for responsive feel during slider interaction
-        ESP_LOGI(TAG, "Setting fan hardware to speed: %d immediately", static_cast<uint8_t>(speed));
+
         DeviceMgr().SetFanSpeed(speed);
-        
-        // Debounce the snapping feedback to avoid jarring slider jumps on slower controllers
-        // The snapped value will be reported back after the timer expires, providing smooth UX
-        // Note: We don't immediately snap the Matter attribute during interaction
-        ESP_LOGI(TAG, "Will report snapped value %d%% after 300ms debounce", snappedPercent);
-        
-        // Create timer on first use
-        if (sFanDebounceTimer == NULL)
+
+        // Snap the reported value back if it differed (e.g. controller sent 50%)
+        if (snappedPct != percentSpeed)
         {
-            sFanDebounceTimer = xTimerCreate(
-                "FanSnapDebounce",
-                pdMS_TO_TICKS(300),  // 300ms debounce for snapping feedback
-                pdFALSE,             // One-shot timer
-                NULL,
-                [](TimerHandle_t timer) {
-                    // When timer expires, trigger state sync which will report the snapped value
-                    ESP_LOGI(TAG, "Fan snap debounce timer expired, syncing state");
-                    chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
-                        GetAppTask().UpdateClusterState();
-                    });
-                }
-            );
-        }
-        
-        // Store pending speed for potential use and reset timer
-        sPendingFanSpeed = speed;
-        if (sFanDebounceTimer != NULL)
-        {
-            xTimerReset(sFanDebounceTimer, 0);
+            ESP_LOGI(TAG, "Snapping fan percent from %d to %d", percentSpeed, snappedPct);
+            isSnapping = true;
+            chip::app::Clusters::FanControl::Attributes::PercentSetting::Set(kFanEndpointId, snappedPct);
+            chip::app::Clusters::FanControl::Attributes::PercentCurrent::Set(kFanEndpointId, snappedPct);
+            MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentSetting::Id);
+            MatterReportingAttributeChangeCallback(kFanEndpointId, FanControl::Id, FanControl::Attributes::PercentCurrent::Id);
+            isSnapping = false;
         }
     }
     else

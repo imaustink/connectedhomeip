@@ -58,6 +58,7 @@ public:
     
     // Flag to prevent feedback loop when updating Matter from hardware
     static bool IsUpdatingFromHardware() { return sUpdatingFromHardware; }
+    static void SetUpdatingFromHardware(bool updating) { sUpdatingFromHardware = updating; }
 
 private:
     friend AppTask & GetAppTask(void);

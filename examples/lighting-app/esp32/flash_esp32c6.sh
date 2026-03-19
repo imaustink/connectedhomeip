@@ -7,7 +7,7 @@
 set -e
 
 # Get the port from argument or use default
-PORT="${1:-/dev/cu.usbserial-0001}"
+PORT="${1:-/dev/cu.usbmodem2101}"
 
 echo "Activating ESP-IDF environment..."
 
